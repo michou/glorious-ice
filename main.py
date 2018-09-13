@@ -1,6 +1,10 @@
+import base64
+import hashlib
 import logging
 import os
 import tempfile
+import time
+import zipfile
 
 import boto3
 import peewee
@@ -56,6 +60,56 @@ def perform_backup(root_folder, aws_region, aws_bucket, aws_vault):
             upload_archive(archive_name)
             store_folder_version(database, folder_name, folder_checksum, archive_name)
     update_remote_database(database)
+
+
+class FolderProcessor(object):
+    def __init__(self, absolute_folder_path, destination_folder):
+        self.absolute_folder_path = absolute_folder_path
+        self.destination_folder = destination_folder
+        self.hash = ''
+
+        self._log = logging.getLogger('FolderProcessor')
+
+    def _list_contents(self):
+        paths = [os.path.join(dirname, filename)
+                 for dirname, _, files in os.walk(self.absolute_folder_path)
+                 for filename in files]
+        return sorted(paths)
+
+    def get_hash(self):
+        hasher = hashlib.sha256()
+
+        for path in self._list_contents():
+            with open(path, 'rb') as file:
+                self._log.info("Hashing <%s>", path)
+                for block in iter(lambda: file.read(4096), b''):
+                    hasher.update(block)
+
+        self.hash = hasher.hexdigest()
+        return self.hash
+
+    def archive(self):
+        _, archive_base_name = os.path.split(self.absolute_folder_path)
+        print(self.absolute_folder_path, archive_base_name)
+        archive_base_name = "{}_{}.zip".format(
+            archive_base_name.replace(' ', '-'),
+            base64.b32encode(
+                int(time.time()).to_bytes(6, byteorder='little')
+            ).decode('utf-8').replace('=', ''))
+
+        archive_path = os.path.join(self.destination_folder, archive_base_name)
+        self._log.info("Writing to archive: <%s>", archive_path)
+        with zipfile.ZipFile(archive_path, mode='x') as archive:
+            for path in self._list_contents():
+                self._log.info("\tAdding <%s> to archive", path)
+                archive.write(path)
+
+        return archive_path
+
+class FolderWalker(object):
+    def __init__(self, root_folder):
+        self.root_folder = root_folder
+
 
 
 class Index(object):
@@ -148,8 +202,13 @@ def parse_arguments():
 
 
 if __name__ == '__main__':
-    arguments = parse_arguments()
-    perform_backup(root_folder=arguments.root_folder,
-                   aws_region=arguments.region_name,
-                   aws_bucket=arguments.bucket_name,
-                   aws_vault=arguments.vault_name)
+    # arguments = parse_arguments()
+    # perform_backup(root_folder=arguments.root_folder,
+    #                aws_region=arguments.region_name,
+    #                aws_bucket=arguments.bucket_name,
+    #                aws_vault=arguments.vault_name)
+    with tempfile.TemporaryDirectory(prefix='solid-ice') as destination:
+        fp = FolderProcessor(os.path.abspath('.'), destination)
+
+        print(fp.get_hash())
+        print(fp.archive())
